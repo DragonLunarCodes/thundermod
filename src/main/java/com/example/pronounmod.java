@@ -1,24 +1,175 @@
-package com.example;
+package com.example.pronounmod;
 
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.io.*;
+import java.util.HashMap;
+import java.util.UUID;
 
-public class ExampleMod implements ModInitializer {
-	public static final String MOD_ID = "modid";
+import static net.minecraft.server.command.CommandManager.argument;
+import static net.minecraft.server.command.CommandManager.literal;
+import net.minecraft.command.argument.StringArgumentType;
 
-	// This logger is used to write text to the console and the log file.
-	// It is considered best practice to use your mod id as the logger's name.
-	// That way, it's clear which mod wrote info, warnings, and errors.
-	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-	@Override
-	public void onInitialize() {
-		// This code runs as soon as Minecraft is in a mod-load-ready state.
-		// However, some things (like resources) may still be uninitialized.
-		// Proceed with mild caution.
+public class PronounMod implements ModInitializer {
+    private static final HashMap<UUID, String> playerPronouns = new HashMap<>();
+    private static final File PRONOUNS_FILE = new File("config", "pronouns.txt");  // Adjusted file path
+    private static boolean thunderTagEnabled = false;
 
-		LOGGER.info("Hello Fabric world!");
-	}
+    // Set the UUID for 'thunderpanties' explicitly
+    private static final UUID THUNDERPANTIES_UUID = UUID.fromString("f313c815-a329-492e-9cc9-626e568ab6a4");
+
+    @Override
+    public void onInitialize() {
+        loadPronouns();
+
+        // Register commands
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            dispatcher.register(literal("pronoun")
+                .then(literal("help")
+                .executes(context -> {
+                    context.getSource().sendMessage(Text.literal("Pronoun Commands:\n" +
+                        "/pronoun add <player> <pronouns> - Set or change a player's pronouns\n" +
+                        "/pronoun remove <player> - Remove a player's pronouns\n" +
+                        "/pronoun search <player> - Search for a player's pronouns"));
+                    return 1;
+                })))
+                .then(literal("add")
+                .then(argument("player", StringArgumentType.string())
+                .then(argument("pronouns", StringArgumentType.string())
+                .executes(context -> {
+                    String playerName = StringArgumentType.getString(context, "player");
+                    String pronouns = StringArgumentType.getString(context, "pronouns");
+                    ServerPlayerEntity player = context.getSource().getServer().getPlayerManager().getPlayer(playerName);
+                    UUID uuid = player != null ? player.getUuid() : context.getSource().getServer().getUserCache().findByName(playerName).map(profile -> profile.getId()).orElse(null);
+                    
+                    if (uuid != null) {
+                        playerPronouns.put(uuid, pronouns);
+                        savePronouns();
+                        context.getSource().sendMessage(Text.literal("Set " + playerName + "'s pronouns to: [" + pronouns + "]"));
+                        if (player != null) {
+                            updateTabList(player);
+                        }
+                    } else {
+                        context.getSource().sendMessage(Text.literal("Player not found."));
+                    }
+                    return 1;
+                }))))
+                .then(literal("remove")
+                .then(argument("player", StringArgumentType.string())
+                .executes(context -> {
+                    String playerName = StringArgumentType.getString(context, "player");
+                    UUID uuid = context.getSource().getServer().getUserCache().findByName(playerName).map(profile -> profile.getId()).orElse(null);
+                    
+                    if (uuid != null && playerPronouns.containsKey(uuid)) {
+                        playerPronouns.remove(uuid);
+                        savePronouns();
+                        context.getSource().sendMessage(Text.literal("Removed " + playerName + "'s pronouns."));
+                        ServerPlayerEntity player = context.getSource().getServer().getPlayerManager().getPlayer(playerName);
+                        if (player != null) {
+                            updateTabList(player);
+                        }
+                    } else {
+                        context.getSource().sendMessage(Text.literal("No pronouns set for " + playerName + "."));
+                    }
+                    return 1;
+                })))
+                .then(literal("search")
+                .then(argument("player", StringArgumentType.string())
+                .executes(context -> {
+                    String playerName = StringArgumentType.getString(context, "player");
+                    UUID uuid = context.getSource().getServer().getUserCache().findByName(playerName).map(profile -> profile.getId()).orElse(null);
+                    
+                    if (uuid != null) {
+                        String pronouns = playerPronouns.getOrDefault(uuid, "undefined");
+                        context.getSource().sendMessage(Text.literal(playerName + "'s pronouns: [" + pronouns + "]"));
+                    } else {
+                        context.getSource().sendMessage(Text.literal("Player not found."));
+                    }
+                    return 1;
+                }))));
+            
+            dispatcher.register(literal("thunderon")
+                .executes(context -> {
+                    thunderTagEnabled = true;
+                    context.getSource().sendMessage(Text.literal("(foxgirl) tag enabled for Thunderpanties."));
+                    ServerPlayerEntity player = context.getSource().getServer().getPlayerManager().getPlayer("thunderpanties");
+                    if (player != null) {
+                        updateTabList(player);
+                    }
+                    return 1;
+                }));
+            
+            dispatcher.register(literal("thunderoff")
+                .executes(context -> {
+                    thunderTagEnabled = false;
+                    context.getSource().sendMessage(Text.literal("(foxgirl) tag disabled for Thunderpanties."));
+                    ServerPlayerEntity player = context.getSource().getServer().getPlayerManager().getPlayer("thunderpanties");
+                    if (player != null) {
+                        updateTabList(player);
+                    }
+                    return 1;
+                }));
+        });
+
+        ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStart);
+    }
+
+    private void onServerStart(MinecraftServer server) {
+        server.getPlayerManager().getPlayerList().forEach(this::updateTabList);
+    }
+
+    public static void updateTabList(ServerPlayerEntity player) {
+        UUID uuid = player.getUuid();
+        String pronouns = playerPronouns.get(uuid);
+        String displayName = player.getGameProfile().getName();
+        
+        // Check if player is Thunderpanties and add the (foxgirl) tag
+        if (uuid.equals(THUNDERPANTIES_UUID) && thunderTagEnabled) {
+            displayName = displayName + "(foxgirl) ";
+        }
+        
+        // Default to "undefined" if no pronouns are set
+        if (pronouns == null) {
+            pronouns = "undefined";
+        }
+        
+        if (!pronouns.isEmpty() && !pronouns.equals("undefined")) {
+            displayName += " [" + pronouns + "]";
+        }
+        
+        player.setDisplayName(Text.literal(displayName));
+    }
+
+    private void savePronouns() {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(PRONOUNS_FILE))) {
+            for (UUID uuid : playerPronouns.keySet()) {
+                writer.write(uuid.toString() + "=" + playerPronouns.get(uuid));
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void loadPronouns() {
+        if (!PRONOUNS_FILE.exists()) return;
+        try (BufferedReader reader = new BufferedReader(new FileReader(PRONOUNS_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split("=", 2);
+                if (parts.length == 2) {
+                    playerPronouns.put(UUID.fromString(parts[0]), parts[1]);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 }
